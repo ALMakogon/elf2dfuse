@@ -2,22 +2,22 @@
     command-line tool to convert a STM32 ELF object file into a ST DfuSe image
     Copyright (C) 2017 Peter Lawrence
 
-    Permission is hereby granted, free of charge, to any person obtaining a 
-    copy of this software and associated documentation files (the "Software"), 
-    to deal in the Software without restriction, including without limitation 
-    the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-    and/or sell copies of the Software, and to permit persons to whom the 
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
     Software is furnished to do so, subject to the following conditions:
 
-    The above copyright notice and this permission notice shall be included in 
+    The above copyright notice and this permission notice shall be included in
     all copies or substantial portions of the Software.
 
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR 
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL 
-    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
     DEALINGS IN THE SOFTWARE.
 */
 
@@ -81,13 +81,13 @@ struct memory_blob
 	struct memory_blob *next;
 };
 
-static Elf32_Ehdr eh; 
+static Elf32_Ehdr eh;
 
 static uint8_t read_uint8(FILE *fp)
 {
 	uint8_t c;
 	c = fgetc(fp);
-	return c; 
+	return c;
 }
 
 static uint16_t read_uint16(FILE *fp)
@@ -95,7 +95,7 @@ static uint16_t read_uint16(FILE *fp)
 	uint16_t c;
 	c = fgetc(fp);
 	c |= fgetc(fp)<<8;
-	return c; 
+	return c;
 }
 
 static uint32_t read_uint32(FILE *fp)
@@ -105,7 +105,7 @@ static uint32_t read_uint32(FILE *fp)
 	c |= fgetc(fp)<<8;
 	c |= fgetc(fp)<<16;
 	c |= fgetc(fp)<<24;
-	return c; 
+	return c;
 }
 
 static void printEh(void)
@@ -231,8 +231,17 @@ static struct memory_blob *find_blob(uint32_t address, uint32_t count, struct me
 	while (current)
 	{
 		if (current->address > address)
+		{
+			if(current->address <= address + count)
+			{
+				printf(
+					"ERROR: blob for 0x%08X (size=0x%0X) intersects blob for 0x%08X\n",
+					address, count, current->address
+				);
+				return NULL;
+			}
 			break;
-
+		}
 		previous = current;
 		current = current->next;
 	}
@@ -342,79 +351,95 @@ int main(int argc, char *argv[])
 
 	if (argc < 3)
 	{
-		printf("%s <input.elf> <output.dfu>\n", argv[0]);
+		printf("%s <input.elf> [<input_1.elf> [...]] <output.dfu>\n", argv[0]);
 		return -1;
 	}
-
-	elffp = fopen(argv[1], "rb");
-	if (!elffp)
-	{
-		printf("ERROR: unable to open file <%s> for reading\n", argv[1]);
-		return -1;
-	}
-	dfufp = fopen(argv[2], "wb");
-	if (!dfufp)
-	{
-		fclose(elffp);
-		printf("ERROR: unable to open file <%s> for writing\n", argv[2]);
-		return -1;
-	}
-
-	/*
-	read (and check) ELF header
-	*/
-
-	readEh(elffp); 
-	if (checkEh()) 
-	{
-		fclose(elffp);
-		fclose(dfufp);
-		printEh();
-		return -1;
-	}
-
-	/*
-	read ELF Program Headers
-	*/
-
-	ph = (Elf32_Phdr *)malloc(eh.e_phnum * sizeof(Elf32_Phdr));
-	for(i=0;i<eh.e_phnum;i++)
-	{
-		ph[i] = readPh(i,elffp);
-	}
-
-	/*
-	read ELF Section Headers, and add relevant sections (re-mapped to physical address) to blob list
-	*/
 
 	pm_list = NULL;
-	for(i=0;i<eh.e_shnum;i++)
+
+	for(int n = 1; n < argc-1; n++)
 	{
-		sh = readSh(i,elffp);
-
-		if (0 == (sh.sh_flags & 0x6))
-			continue;
-
-		if ( (1 /* SHT_PROGBITS */ == sh.sh_type) || (14 /* SHT_INIT_ARRAY */ == sh.sh_type) || (15 /* SHT_FINI_ARRAY */ == sh.sh_type) || (16 /* SHT_PREINIT_ARRAY */ == sh.sh_type) || (0x70000001 /* SHT_HIPROC|SHT_PROGBITS */ == sh.sh_type) )
+		elffp = fopen(argv[n], "rb");
+		if (elffp)
 		{
-			for (j = 0; j < eh.e_phnum; j++)
-			{
-				if ( (sh.sh_addr >= ph[j].p_vaddr) && (sh.sh_addr < (ph[j].p_vaddr + ph[j].p_memsz)) && ph[j].p_filesz )
-				{
-					phy_addr = ph[j].p_paddr + (sh.sh_addr - ph[j].p_vaddr);
-					blob = find_blob(phy_addr, sh.sh_size, &pm_list);
+			printf("Reading file <%s>\n", argv[n]);
+		}
+		else
+		{
+			printf("ERROR: unable to open file <%s> for reading\n", argv[n]);
+			return -1;
+		}
 
-					fseek(elffp, sh.sh_offset, SEEK_SET);
-					fread(blob->data, blob->count, 1, elffp);
-					break;
+		/*
+		read (and check) ELF header
+		*/
+
+		readEh(elffp);
+		if (checkEh())
+		{
+			fclose(elffp);
+			printEh();
+			return -1;
+	}
+
+		/*
+		read ELF Program Headers
+		*/
+
+		ph = (Elf32_Phdr *)malloc(eh.e_phnum * sizeof(Elf32_Phdr));
+		for(i=0;i<eh.e_phnum;i++)
+		{
+			ph[i] = readPh(i,elffp);
+		}
+
+		/*
+		read ELF Section Headers, and add relevant sections (re-mapped to physical address) to blob list
+		*/
+
+		for(i=0;i<eh.e_shnum;i++)
+		{
+			sh = readSh(i,elffp);
+
+			if (0 == (sh.sh_flags & 0x6))
+				continue;
+
+			if ( (1 /* SHT_PROGBITS */ == sh.sh_type) || (14 /* SHT_INIT_ARRAY */ == sh.sh_type) || (15 /* SHT_FINI_ARRAY */ == sh.sh_type) || (16 /* SHT_PREINIT_ARRAY */ == sh.sh_type) || (0x70000001 /* SHT_HIPROC|SHT_PROGBITS */ == sh.sh_type) )
+			{
+				for (j = 0; j < eh.e_phnum; j++)
+				{
+					if ( (sh.sh_addr >= ph[j].p_vaddr) && (sh.sh_addr < (ph[j].p_vaddr + ph[j].p_memsz)) && ph[j].p_filesz )
+					{
+						phy_addr = ph[j].p_paddr + (sh.sh_addr - ph[j].p_vaddr);
+						blob = find_blob(phy_addr, sh.sh_size, &pm_list);
+						if(blob==NULL){
+							free(ph);
+							fclose(elffp);
+							return -1;
+						}
+
+						fseek(elffp, sh.sh_offset, SEEK_SET);
+						fread(blob->data, blob->count, 1, elffp);
+						break;
+					}
 				}
 			}
-		} 
-	}
-	free(ph);
+		}
+		free(ph);
 
-	/* we've read everything we need from the ELF file, so we can close the file */
-	fclose(elffp);
+		/* we've read everything we need from the ELF file, so we can close the file */
+		fclose(elffp);
+	}
+
+	dfufp = fopen(argv[argc-1], "wb");
+	if (dfufp)
+	{
+		printf("Writing file <%s>\n", argv[argc-1]);
+	}
+	else
+	{
+		printf("ERROR: unable to open file <%s> for writing\n", argv[argc-1]);
+		return -1;
+	}
 
 	/*
 	count the number of non-contiguous memory "image_elements" as well as tabulate the total file size
@@ -515,7 +540,7 @@ int main(int argc, char *argv[])
 
 			seek = seek->next;
 		}
-	
+
 		/*
 		write unique-to-ST DfuSe 'Image Element' prefix (providing origin address and size)
 		*/
